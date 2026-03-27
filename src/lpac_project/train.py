@@ -1,0 +1,237 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+
+from .data import (
+    PackedPatientDataset,
+    build_tensor_transform,
+    limit_indices,
+    load_pack,
+    patient_split_indices,
+    save_split_artifact,
+)
+from .engine import run_eval_epoch, run_train_epoch
+from .models.registry import build_model, get_model_normalization
+from .utils import (
+    append_metrics_row,
+    copy_file,
+    load_config,
+    make_run_dir,
+    save_json,
+    seed_everything,
+    select_device,
+)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--smoke", action="store_true")
+    return parser.parse_args()
+
+
+def compute_class_weights(labels: torch.Tensor, num_classes: int) -> torch.Tensor:
+    counts = torch.bincount(labels.long(), minlength=num_classes).float()
+    weights = counts.sum() / (num_classes * counts.clamp_min(1.0))
+    return weights
+
+
+def main():
+    args = parse_args()
+
+    config = load_config(args.config)
+    run_cfg = config["run"]
+    data_cfg = config["data"]
+    model_cfg = config["model"]
+    train_cfg = config["train"]
+
+    seed = int(data_cfg["seed"])
+    seed_everything(seed)
+
+    device = select_device(args.device)
+    run_dir = make_run_dir(run_cfg["output_root"], run_cfg["name"])
+    copy_file(args.config, run_dir / "config.toml")
+
+    print(f"Using device: {device}")
+    print(f"Run directory: {run_dir}")
+
+    pack = load_pack(data_cfg["dataset_path"])
+
+    train_idx, val_idx, test_idx = patient_split_indices(
+        patients=pack["patients"],
+        train_fraction=float(data_cfg["train_fraction"]),
+        val_fraction=float(data_cfg["val_fraction"]),
+        test_fraction=float(data_cfg["test_fraction"]),
+        seed=seed,
+    )
+
+    if args.smoke:
+        train_idx = limit_indices(train_idx, max_items=16, seed=seed + 1)
+        val_idx = limit_indices(val_idx, max_items=8, seed=seed + 2)
+        test_idx = limit_indices(test_idx, max_items=8, seed=seed + 3)
+
+    save_split_artifact(
+        output_path=run_dir / "split.json",
+        patients=pack["patients"],
+        train_indices=train_idx,
+        val_indices=val_idx,
+        test_indices=test_idx,
+    )
+
+    normalization = get_model_normalization(model_cfg)
+    transform_cfg = data_cfg.get("transform", {})
+
+    train_transform = build_tensor_transform(
+        mean=normalization["mean"] if normalization else None,
+        std=normalization["std"] if normalization else None,
+        random_horizontal_flip_p=float(transform_cfg.get("random_horizontal_flip_p", 0.0)),
+    )
+    eval_transform = build_tensor_transform(
+        mean=normalization["mean"] if normalization else None,
+        std=normalization["std"] if normalization else None,
+        random_horizontal_flip_p=0.0,
+    )
+
+    train_dataset = PackedPatientDataset(pack, indices=train_idx, transform=train_transform)
+    val_dataset = PackedPatientDataset(pack, indices=val_idx, transform=eval_transform)
+    test_dataset = PackedPatientDataset(pack, indices=test_idx, transform=eval_transform)
+
+    num_workers = int(data_cfg.get("num_workers", 0))
+    pin_memory = bool(data_cfg.get("pin_memory", device.type == "cuda"))
+
+    loader_kwargs = {
+        "batch_size": int(train_cfg["batch_size"]),
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": num_workers > 0,
+    }
+
+    train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
+    test_loader = DataLoader(test_dataset, shuffle=False, **loader_kwargs)
+
+    model = build_model(model_cfg).to(device)
+
+    if bool(train_cfg.get("use_class_weights", False)):
+        train_labels = pack["labels"][train_idx]
+        class_weights = compute_class_weights(
+            labels=train_labels,
+            num_classes=int(model_cfg["num_classes"]),
+        ).to(device)
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+    else:
+        criterion = nn.CrossEntropyLoss()
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(train_cfg["lr"]),
+        weight_decay=float(train_cfg.get("weight_decay", 0.0)),
+    )
+
+    use_amp = bool(train_cfg.get("use_amp", True))
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")
+
+    epochs = 1 if args.smoke else int(train_cfg["epochs"])
+    metrics_csv = run_dir / "metrics.csv"
+
+    best_val_bal_acc = float("-inf")
+
+    for epoch in range(1, epochs + 1):
+        print(f"\nEpoch {epoch}/{epochs}")
+
+        train_metrics = run_train_epoch(
+            model=model,
+            loader=train_loader,
+            criterion=criterion,
+            optimizer=optimizer,
+            device=device,
+            scaler=scaler,
+            use_amp=use_amp,
+        )
+
+        val_metrics = run_eval_epoch(
+            model=model,
+            loader=val_loader,
+            criterion=criterion,
+            device=device,
+            use_amp=use_amp,
+        )
+
+        row = {
+            "epoch": epoch,
+            "train_loss": train_metrics["loss"],
+            "train_accuracy": train_metrics["accuracy"],
+            "train_balanced_accuracy": train_metrics["balanced_accuracy"],
+            "val_loss": val_metrics["loss"],
+            "val_accuracy": val_metrics["accuracy"],
+            "val_balanced_accuracy": val_metrics["balanced_accuracy"],
+        }
+        append_metrics_row(metrics_csv, row)
+
+        print(
+            "train "
+            f"loss={train_metrics['loss']:.4f} "
+            f"acc={train_metrics['accuracy']:.4f} "
+            f"bal_acc={train_metrics['balanced_accuracy']:.4f}"
+        )
+        print(
+            "val   "
+            f"loss={val_metrics['loss']:.4f} "
+            f"acc={val_metrics['accuracy']:.4f} "
+            f"bal_acc={val_metrics['balanced_accuracy']:.4f}"
+        )
+
+        checkpoint = {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "config": config,
+        }
+        torch.save(checkpoint, run_dir / "last_model.pt")
+
+        if val_metrics["balanced_accuracy"] >= best_val_bal_acc:
+            best_val_bal_acc = val_metrics["balanced_accuracy"]
+            torch.save(checkpoint, run_dir / "best_model.pt")
+
+    best_checkpoint = torch.load(run_dir / "best_model.pt", map_location=device, weights_only=False)
+    model.load_state_dict(best_checkpoint["model_state_dict"])
+
+    test_metrics = run_eval_epoch(
+        model=model,
+        loader=test_loader,
+        criterion=criterion,
+        device=device,
+        use_amp=use_amp,
+    )
+
+    save_json(
+        run_dir / "test_metrics.json",
+        {
+            "best_val_balanced_accuracy": best_val_bal_acc,
+            "test_loss": test_metrics["loss"],
+            "test_accuracy": test_metrics["accuracy"],
+            "test_balanced_accuracy": test_metrics["balanced_accuracy"],
+            "test_tn": test_metrics["tn"],
+            "test_fp": test_metrics["fp"],
+            "test_fn": test_metrics["fn"],
+            "test_tp": test_metrics["tp"],
+        },
+    )
+
+    print("\nFinal test metrics")
+    print(
+        f"loss={test_metrics['loss']:.4f} "
+        f"acc={test_metrics['accuracy']:.4f} "
+        f"bal_acc={test_metrics['balanced_accuracy']:.4f}"
+    )
+    print(f"Artifacts saved in: {run_dir}")
+
+
+if __name__ == "__main__":
+    main()

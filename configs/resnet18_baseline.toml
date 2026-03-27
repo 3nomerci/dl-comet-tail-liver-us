@@ -1,0 +1,29 @@
+[run]
+name = "resnet18_baseline"
+output_root = "outputs"
+
+[data]
+dataset_path = "data/dataset.pt"
+train_fraction = 0.70
+val_fraction = 0.15
+test_fraction = 0.15
+seed = 42
+num_workers = 0
+pin_memory = true
+
+[data.transform]
+random_horizontal_flip_p = 0.0
+
+[model]
+name = "resnet18"
+num_classes = 2
+pretrained = true
+dropout = 0.0
+
+[train]
+batch_size = 1
+epochs = 5
+lr = 1e-4
+weight_decay = 1e-4
+use_amp = true
+use_class_weights = false

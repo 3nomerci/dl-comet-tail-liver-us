@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[oc]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Build artifacts
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Virtual environments
+.venv/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Data and outputs
+# ignore the content of data/ and outputs/, but we keep the directories with .gitkeep so the structure remains in the repo.
+data/*
+!data/.gitkeep
+outputs/*
+!outputs/.gitkeep
+runs/
+checkpoints/
+
+# PyTorch artifacts
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# Logs
+*.log
+slurm-*.out
+slurm-*.err

@@ -1,0 +1,2 @@
+uv run pytest
+uv run python -m lpac_project.train --config configs/resnet18_baseline.toml --smoke --device cuda
