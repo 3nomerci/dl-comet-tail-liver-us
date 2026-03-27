@@ -1,6 +1,6 @@
 # LPAC_project
 
-Repository for LPAC echocardiographic classification experiments.
+Repository for LPAC classification experiments.
 
 ## Initial Objective
 Simple and reliable baseline with ResNet18 on a dataset already prepared in .pt format.
