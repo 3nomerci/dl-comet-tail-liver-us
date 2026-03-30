@@ -90,12 +90,12 @@ def main():
     train_transform = build_tensor_transform(
         mean=normalization["mean"] if normalization else None,
         std=normalization["std"] if normalization else None,
-        random_horizontal_flip_p=float(transform_cfg.get("random_horizontal_flip_p", 0.0)),
+        random_horizontal_flip_p=float(transform_cfg.get("random_horizontal_flip_p", 0.0)),  # try to get the flip probability from config, default to 0.0
     )
     eval_transform = build_tensor_transform(
         mean=normalization["mean"] if normalization else None,
         std=normalization["std"] if normalization else None,
-        random_horizontal_flip_p=0.0,
+        random_horizontal_flip_p=0.0,  # no augmentation during evaluation
     )
 
     train_dataset = PackedPatientDataset(pack, indices=train_idx, transform=train_transform)

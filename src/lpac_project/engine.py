@@ -13,7 +13,7 @@ def run_train_epoch(
     optimizer,
     device: torch.device,
     scaler=None,
-    use_amp: bool = True,
+    use_amp: bool = True, # Automatic Mixed Precision
 ) -> dict[str, float]:
     model.train()
 

@@ -4,11 +4,9 @@ import torch.nn as nn
 from torchvision.models import ResNet18_Weights, resnet18
 
 
-def build_resnet18(
-    num_classes: int = 2,
-    pretrained: bool = True,
-    dropout: float = 0.0,
-) -> nn.Module:
+def build_resnet18(num_classes: int = 2, pretrained: bool = True,dropout: float = 0.0,) -> nn.Module:
+    '''Builds a ResNet-18 model, replacing the final classification head with a custom one'''
+    
     weights = ResNet18_Weights.DEFAULT if pretrained else None
     model = resnet18(weights=weights)
 

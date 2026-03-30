@@ -13,6 +13,7 @@ REQUIRED_KEYS = ("images", "labels", "patients")
 
 
 def load_pack(path: str | Path) -> dict:
+    '''Loads a dataset pack from a .pt file and validates its structure.'''
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Dataset file not found: {path}")
@@ -59,6 +60,7 @@ def validate_pack(pack: dict) -> None:
 
 
 def validate_patient_label_consistency(labels: torch.Tensor, patients: torch.Tensor) -> None:
+    '''Ensures that each patient has a consistent label across all samples.'''
     patient_to_label: dict[int, int] = {}
 
     for patient, label in zip(patients.tolist(), labels.tolist(), strict=False):
@@ -75,6 +77,8 @@ def validate_patient_label_consistency(labels: torch.Tensor, patients: torch.Ten
 
 
 class PackedPatientDataset(Dataset):
+    '''This class is a subclass of torch.utils.data.Dataset that provides access to the images, labels, and patient IDs stored in a dataset pack. 
+    It supports optional indexing to create subsets and can apply transformations to the images.'''
     def __init__(
         self,
         pack: dict,
@@ -116,6 +120,11 @@ def patient_split_indices(
     test_fraction: float,
     seed: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    '''Splits the dataset into train/val/test sets based on patientIDs, ensuring that all samples from the same patient are in the same split.
+    TODO: Add stratification to ensure class balance
+    TODO: Add euristic to handle cases where patients have very different number of samples (e.g. one patient has 100 samples, others have 1-2)
+'''
+    
     total = train_fraction + val_fraction + test_fraction
     if abs(total - 1.0) > 1e-8:
         raise ValueError(f"Split fractions must sum to 1.0, got {total}")
@@ -163,12 +172,12 @@ def limit_indices(indices: torch.Tensor, max_items: int | None, seed: int) -> to
 def build_tensor_transform(
     mean: list[float] | None = None,
     std: list[float] | None = None,
-    random_horizontal_flip_p: float = 0.0,
+    random_horizontal_flip_p: float = 0.0, # probability of flipping each image
 ):
     ops = []
 
     if random_horizontal_flip_p > 0.0:
-        ops.append(T.RandomHorizontalFlip(p=random_horizontal_flip_p))
+        ops.append(T.RandomHorizontalFlip(p=random_horizontal_flip_p)) 
 
     if mean is not None and std is not None:
         ops.append(T.Normalize(mean=mean, std=std))
@@ -186,6 +195,8 @@ def save_split_artifact(
     val_indices: torch.Tensor,
     test_indices: torch.Tensor,
 ) -> None:
+    '''Saves the patient split information to a JSON file for reproducibility and analysis.'''
+    
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
