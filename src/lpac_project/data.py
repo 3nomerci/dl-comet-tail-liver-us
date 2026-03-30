@@ -115,41 +115,108 @@ class PackedPatientDataset(Dataset):
 
 def patient_split_indices(
     patients: torch.Tensor,
+    labels: torch.Tensor,
     train_fraction: float,
     val_fraction: float,
     test_fraction: float,
     seed: int,
+    stratify: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    '''Splits the dataset into train/val/test sets based on patientIDs, ensuring that all samples from the same patient are in the same split.
-    TODO: Add stratification to ensure class balance
-    TODO: Add euristic to handle cases where patients have very different number of samples (e.g. one patient has 100 samples, others have 1-2)
-'''
-    
+    '''Split samples by patient while targeting sample fractions and optional label stratification.'''
+
+    if patients.ndim != 1 or labels.ndim != 1:
+        raise ValueError("patients and labels must be 1D tensors")
+    if patients.numel() != labels.numel():
+        raise ValueError("patients and labels must have the same number of elements")
+
+    validate_patient_label_consistency(labels=labels, patients=patients)
+
     total = train_fraction + val_fraction + test_fraction
     if abs(total - 1.0) > 1e-8:
         raise ValueError(f"Split fractions must sum to 1.0, got {total}")
 
-    unique_patients = torch.unique(patients).cpu().numpy()
+    unique_patients = torch.unique(patients).cpu().numpy() # 1D tensor of patient IDs
     rng = np.random.default_rng(seed)
-    rng.shuffle(unique_patients)
 
     n_patients = len(unique_patients)
     if n_patients < 3:
         raise ValueError("Need at least 3 unique patients for train/val/test split.")
 
-    n_train = int(n_patients * train_fraction)
-    n_val = int(n_patients * val_fraction)
-    n_test = n_patients - n_train - n_val
+    # Compute per-patient sample counts and patient label.
+    patient_values = patients.cpu().numpy()
+    label_values = labels.cpu().numpy()
+    patient_stats: list[tuple[int, int, int]] = [] # List of (patient_id, sample_count, patient_label)
+    for patient in unique_patients.tolist():
+        mask = patient_values == patient
+        patient_count = int(mask.sum())
+        patient_label = int(label_values[mask][0])
+        patient_stats.append((int(patient), patient_count, patient_label))
 
-    if n_train == 0 or n_val == 0 or n_test == 0:
-        raise ValueError(
-            f"Invalid split sizes for {n_patients} patients: "
-            f"train={n_train}, val={n_val}, test={n_test}"
-        )
+    # Randomize tie-breakers, then assign patients to splits in order of decreasing sample count
+    rng.shuffle(patient_stats)
+    patient_stats.sort(key=lambda x: x[1], reverse=True)
 
-    train_patients = torch.as_tensor(unique_patients[:n_train], dtype=patients.dtype)
-    val_patients = torch.as_tensor(unique_patients[n_train:n_train + n_val], dtype=patients.dtype)
-    test_patients = torch.as_tensor(unique_patients[n_train + n_val:], dtype=patients.dtype)
+    fractions = np.array([train_fraction, val_fraction, test_fraction], dtype=np.float64)
+    target_samples = fractions * float(len(patient_values)) # target number of samples per split
+    target_pos_samples = fractions * float((labels == 1).sum().item()) # target number of positive samples per split (stratification)
+    target_patients = fractions * float(n_patients) # target number of patients per split (secondary balancing criterion)
+
+    split_patients: list[list[int]] = [[], [], []] # patient IDs assigned to each split
+    split_sample_counts = np.zeros(3, dtype=np.float64)
+    split_pos_sample_counts = np.zeros(3, dtype=np.float64)
+    split_patient_counts = np.zeros(3, dtype=np.float64)
+
+    for idx, (patient, patient_count, patient_label) in enumerate(patient_stats): # iterate over patients in order of decreasing sample count
+        remaining = n_patients - idx
+        empty_splits = [i for i in range(3) if len(split_patients[i]) == 0]
+        if len(empty_splits) == remaining:
+            candidate_splits = empty_splits
+        else:
+            candidate_splits = [0, 1, 2]
+
+        best_split = None
+        best_score = None
+
+        for split_id in candidate_splits: # for each split, compute hypothetical new sample counts and score based on distance from target, then assign patient to best split
+            new_sample_counts = split_sample_counts.copy()
+            new_sample_counts[split_id] += float(patient_count)
+            new_patient_counts = split_patient_counts.copy()
+            new_patient_counts[split_id] += 1.0
+
+            sample_score = np.abs(new_sample_counts - target_samples) / np.maximum(target_samples, 1.0)
+            score = float(sample_score.sum())
+
+            patient_score = np.abs(new_patient_counts - target_patients) / np.maximum(target_patients, 1.0)
+            score += 0.25 * float(patient_score.sum())
+
+            if stratify:
+                new_pos_counts = split_pos_sample_counts.copy()
+                new_pos_counts[split_id] += float(patient_count if patient_label == 1 else 0)
+                pos_score = np.abs(new_pos_counts - target_pos_samples) / np.maximum(target_pos_samples, 1.0)
+                score += 2.0 * float(pos_score.sum())
+
+            # Tiny jitter avoids deterministic bias toward lower-index splits on exact ties.
+            score += float(rng.uniform(0.0, 1e-12))
+
+            # best split is determined with an heuristic score based on distance from target sample counts, 
+            # with optional stratification and secondary balancing based on patient counts to avoid extreme imbalances when patients have many samples.
+            if best_score is None or score < best_score:
+                best_score = score
+                best_split = split_id
+
+        assert best_split is not None
+        split_patients[best_split].append(patient)
+        split_sample_counts[best_split] += float(patient_count)
+        split_patient_counts[best_split] += 1.0
+        if patient_label == 1:
+            split_pos_sample_counts[best_split] += float(patient_count)
+
+    if any(len(x) == 0 for x in split_patients):
+        raise ValueError("Unable to create train/val/test split with at least one patient per split")
+
+    train_patients = torch.as_tensor(split_patients[0], dtype=patients.dtype)
+    val_patients = torch.as_tensor(split_patients[1], dtype=patients.dtype)
+    test_patients = torch.as_tensor(split_patients[2], dtype=patients.dtype)
 
     train_indices = torch.nonzero(torch.isin(patients, train_patients), as_tuple=False).squeeze(1)
     val_indices = torch.nonzero(torch.isin(patients, val_patients), as_tuple=False).squeeze(1)
@@ -191,14 +258,28 @@ def build_tensor_transform(
 def save_split_artifact(
     output_path: str | Path,
     patients: torch.Tensor,
+    labels: torch.Tensor,
     train_indices: torch.Tensor,
     val_indices: torch.Tensor,
     test_indices: torch.Tensor,
+    train_fraction: float | None = None,
+    val_fraction: float | None = None,
+    test_fraction: float | None = None,
+    seed: int | None = None,
+    method: str | None = None,
+    stratify: bool | None = None,
+    summary_output_path: str | Path | None = None,
 ) -> None:
     '''Saves the patient split information to a JSON file for reproducibility and analysis.'''
-    
+
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    split_indices = {
+        "train": train_indices,
+        "val": val_indices,
+        "test": test_indices,
+    }
 
     payload = {
         "train_indices": train_indices.tolist(),
@@ -211,3 +292,63 @@ def save_split_artifact(
 
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+
+    if summary_output_path is None:
+        summary_output_path = output_path.with_name("split_summary.json")
+
+    summary_output_path = Path(summary_output_path)
+    summary_output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    total_samples = int(labels.numel())
+    total_patients = int(torch.unique(patients).numel())
+    total_positive = int((labels == 1).sum().item())
+    total_negative = int((labels == 0).sum().item())
+
+    target_fractions = {
+        "train": train_fraction,
+        "val": val_fraction,
+        "test": test_fraction,
+    }
+
+    split_summary: dict[str, dict] = {}
+    for split_name, indices in split_indices.items():
+        split_patients = torch.unique(patients[indices])
+        split_labels = labels[indices]
+        sample_count = int(indices.numel())
+        patient_count = int(split_patients.numel())
+        positive_count = int((split_labels == 1).sum().item())
+        negative_count = int((split_labels == 0).sum().item())
+
+        target_fraction = target_fractions[split_name]
+        actual_fraction = float(sample_count / total_samples) if total_samples > 0 else None
+
+        split_summary[split_name] = {
+            "num_samples": sample_count,
+            "num_patients": patient_count,
+            "positive_samples": positive_count,
+            "negative_samples": negative_count,
+            "patient_ids": split_patients.tolist(),
+            "target_fraction": target_fraction,
+            "actual_fraction": actual_fraction,
+            "fraction_error": (
+                float(abs(actual_fraction - target_fraction))
+                if actual_fraction is not None and target_fraction is not None
+                else None
+            ),
+        }
+
+    summary_payload = {
+        "split_method": method,
+        "seed": seed,
+        "stratify": stratify,
+        "totals": {
+            "num_samples": total_samples,
+            "num_patients": total_patients,
+            "positive_samples": total_positive,
+            "negative_samples": total_negative,
+        },
+        "splits": split_summary,
+    }
+
+    with summary_output_path.open("w", encoding="utf-8") as f:
+        json.dump(summary_payload, f, indent=2)

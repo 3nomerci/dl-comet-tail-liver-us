@@ -48,10 +48,18 @@ def main():
     config = load_config(args.config)
     run_cfg = config["run"]
     data_cfg = config["data"]
+    split_cfg = config.get("split", {})
     model_cfg = config["model"]
     train_cfg = config["train"]
 
-    seed = int(data_cfg["seed"])
+    seed = int(split_cfg["seed"])
+    train_fraction = float(split_cfg["train_fraction"])
+    val_fraction = float(split_cfg["val_fraction"])
+    test_fraction = float(split_cfg["test_fraction"])
+    stratify = bool(split_cfg.get("stratify", True))
+    split_method = str(split_cfg.get("method", "heuristic_group_holdout"))
+    save_split_artifact_flag = bool(split_cfg.get("save_artifact", True))
+
     seed_everything(seed)
 
     device = select_device(args.device)
@@ -65,24 +73,37 @@ def main():
 
     train_idx, val_idx, test_idx = patient_split_indices(
         patients=pack["patients"],
-        train_fraction=float(data_cfg["train_fraction"]),
-        val_fraction=float(data_cfg["val_fraction"]),
-        test_fraction=float(data_cfg["test_fraction"]),
+        labels=pack["labels"],
+        train_fraction=train_fraction,
+        val_fraction=val_fraction,
+        test_fraction=test_fraction,
         seed=seed,
+        stratify=stratify,
     )
+
+    if save_split_artifact_flag:
+        # NOTE: even if args.smoke is enabled the split artifact is saved with the full indices, 
+        # as the smoke mode only limits the indices used in training/validation/test loaders, not the actual split saved.
+        save_split_artifact(
+            output_path=run_dir / "split.json",
+            summary_output_path=run_dir / "split_summary.json",
+            patients=pack["patients"],
+            labels=pack["labels"],
+            train_indices=train_idx,
+            val_indices=val_idx,
+            test_indices=test_idx,
+            train_fraction=train_fraction,
+            val_fraction=val_fraction,
+            test_fraction=test_fraction,
+            seed=seed,
+            method=split_method,
+            stratify=stratify,
+        )
 
     if args.smoke:
-        train_idx = limit_indices(train_idx, max_items=16, seed=seed + 1)
-        val_idx = limit_indices(val_idx, max_items=8, seed=seed + 2)
-        test_idx = limit_indices(test_idx, max_items=8, seed=seed + 3)
-
-    save_split_artifact(
-        output_path=run_dir / "split.json",
-        patients=pack["patients"],
-        train_indices=train_idx,
-        val_indices=val_idx,
-        test_indices=test_idx,
-    )
+        train_idx = limit_indices(train_idx, max_items=100, seed=seed + 1)
+        val_idx = limit_indices(val_idx, max_items=100, seed=seed + 2)
+        test_idx = limit_indices(test_idx, max_items=100, seed=seed + 3)
 
     normalization = get_model_normalization(model_cfg)
     transform_cfg = data_cfg.get("transform", {})

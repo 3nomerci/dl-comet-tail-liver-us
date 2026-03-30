@@ -1,26 +1,114 @@
 # LPAC_project
 
-Repository for LPAC classification experiments.
+LPAC_project is a config-driven PyTorch repository for binary medical image classification experiments.
+The current baseline is ResNet18 and the core protocol requirement is patient-level splitting with no leakage.
 
-## Initial Objective
-Simple and reliable baseline with ResNet18 on a dataset already prepared in .pt format.
+## Project Goals
+- Build a credible, reproducible baseline with simple engineering.
+- Keep the repository model-agnostic (ResNet18 is only the first model).
+- Prioritize experimental correctness over framework complexity.
 
 ## Dataset Assumptions
-The repository assumes that data preparation has already been performed offline and that the dataset is available as a .pt file.
+Data preparation is done offline. Training code consumes a packed dataset file, for example data/dataset.pt.
+
+Expected structure:
+
+```python
+{
+		"images": Tensor [N, 3, H, W],
+		"labels": Tensor [N],
+		"patients": Tensor [N],
+		"paths": list[str],
+		"image_size": int,
+}
+```
+
+Current packed baseline assumptions:
+- images are already standardized to 3 x 768 x 768
+- labels and patients are torch.long
+- patient IDs are integer-valued
+- baseline packing already applied aspect-ratio resize, center padding, and min-max normalization
 
 ## Setup
+
+```bash
 uv sync
+```
 
-## Execution
-Local smoke test:
+## Quick Validation
+
+```bash
 uv run pytest
+```
 
-Train:
+## Training
+
+```bash
 uv run python -m lpac_project.train --config configs/resnet18_baseline.toml
+```
 
-Note: 'uv sync' is the correct command to synchronize the project environment, and 'uv run' is the right wrapper to execute commands in the project context.
+Smoke mode:
 
-## Initial Commit
-git status
-git add .
-git commit -m "Initialize project structure and uv-based environment"
+```bash
+uv run python -m lpac_project.train --config configs/resnet18_baseline.toml --smoke
+```
+
+## Split Logic
+Splits are patient-level and deterministic under fixed seed.
+
+Implemented behavior:
+- patient-level non-leakage
+- optional label stratification (binary labels)
+- sample-aware assignment that tries to match train/val/test sample fractions
+
+Config keys in configs/resnet18_baseline.toml:
+
+```toml
+[split]
+method = "heuristic_group_holdout"
+seed = 42
+train_fraction = 0.70
+val_fraction = 0.15
+test_fraction = 0.15
+stratify = true
+save_artifact = true
+```
+
+Notes:
+- fractions are targets on sample counts, while assignment is constrained by whole-patient groups
+- exact fraction match is not always possible when patient sample counts are highly unbalanced
+
+## Run Artifacts
+Each training run creates an output folder under outputs/ with:
+- config.toml: copied run config
+- metrics.csv: epoch-level train/val metrics
+- last_model.pt: last checkpoint
+- best_model.pt: best checkpoint by validation balanced accuracy
+- test_metrics.json: final test metrics from best checkpoint
+- split.json: split indices and patient IDs per split
+- split_summary.json: split audit summary (counts, fractions, class counts, metadata)
+
+## Local vs Cluster Workflow
+Local machine:
+- run tests
+- run smoke/debug jobs
+- validate configs
+
+Cluster:
+- run full training and longer experiments
+- use robust transfer for data and code (rsync preferred)
+
+## Repository Structure
+
+```text
+configs/
+scripts/
+src/lpac_project/
+	data.py
+	train.py
+	engine.py
+	evaluate.py
+	metrics.py
+	models/
+tests/
+```

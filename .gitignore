@@ -39,3 +39,6 @@ checkpoints/
 *.log
 slurm-*.out
 slurm-*.err
+
+# Agent files
+.github/agents/*.agent.md

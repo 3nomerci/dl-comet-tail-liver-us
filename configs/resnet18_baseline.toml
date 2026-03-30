@@ -4,12 +4,17 @@ output_root = "outputs"
 
 [data]
 dataset_path = "data/dataset.pt"
+num_workers = 0
+pin_memory = true
+
+[split]
+method = "heuristic_group_holdout"
+seed = 42
 train_fraction = 0.70
 val_fraction = 0.15
 test_fraction = 0.15
-seed = 42
-num_workers = 0
-pin_memory = true
+stratify = true
+save_artifact = true
 
 [data.transform]
 random_horizontal_flip_p = 0.0
@@ -27,14 +32,3 @@ lr = 1e-4
 weight_decay = 1e-4
 use_amp = true
 use_class_weights = false
-
-[split]
-method = "heuristic_group_holdout"
-seed = 42
-train_fraction = 0.70
-val_fraction = 0.15
-test_fraction = 0.15
-stratify = true
-balance_on = "samples"   # "patients" | "samples"
-tolerance = 0.05
-save_artifact = true
