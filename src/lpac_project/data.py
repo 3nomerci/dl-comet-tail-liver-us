@@ -121,6 +121,7 @@ def patient_split_indices(
     test_fraction: float,
     seed: int,
     stratify: bool = True,
+    method = "heuristic_balanced",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     '''Split samples by patient while targeting sample fractions and optional label stratification.'''
 
@@ -141,83 +142,92 @@ def patient_split_indices(
     n_patients = len(unique_patients)
     if n_patients < 3:
         raise ValueError("Need at least 3 unique patients for train/val/test split.")
+    if method == "heuristic_balanced":
+        # Compute per-patient sample counts and patient label.
+        patient_values = patients.cpu().numpy()
+        label_values = labels.cpu().numpy()
+        patient_stats: list[tuple[int, int, int]] = [] # List of (patient_id, sample_count, patient_label)
+        for patient in unique_patients.tolist():
+            mask = patient_values == patient
+            patient_count = int(mask.sum())
+            patient_label = int(label_values[mask][0])
+            patient_stats.append((int(patient), patient_count, patient_label))
 
-    # Compute per-patient sample counts and patient label.
-    patient_values = patients.cpu().numpy()
-    label_values = labels.cpu().numpy()
-    patient_stats: list[tuple[int, int, int]] = [] # List of (patient_id, sample_count, patient_label)
-    for patient in unique_patients.tolist():
-        mask = patient_values == patient
-        patient_count = int(mask.sum())
-        patient_label = int(label_values[mask][0])
-        patient_stats.append((int(patient), patient_count, patient_label))
+        # Randomize tie-breakers, then assign patients to splits in order of decreasing sample count
+        rng.shuffle(patient_stats)
+        patient_stats.sort(key=lambda x: x[1], reverse=True)
 
-    # Randomize tie-breakers, then assign patients to splits in order of decreasing sample count
-    rng.shuffle(patient_stats)
-    patient_stats.sort(key=lambda x: x[1], reverse=True)
+        fractions = np.array([train_fraction, val_fraction, test_fraction], dtype=np.float64)
+        target_samples = fractions * float(len(patient_values)) # target number of samples per split
+        target_pos_samples = fractions * float((labels == 1).sum().item()) # target number of positive samples per split (stratification)
+        target_patients = fractions * float(n_patients) # target number of patients per split (secondary balancing criterion)
 
-    fractions = np.array([train_fraction, val_fraction, test_fraction], dtype=np.float64)
-    target_samples = fractions * float(len(patient_values)) # target number of samples per split
-    target_pos_samples = fractions * float((labels == 1).sum().item()) # target number of positive samples per split (stratification)
-    target_patients = fractions * float(n_patients) # target number of patients per split (secondary balancing criterion)
+        split_patients: list[list[int]] = [[], [], []] # patient IDs assigned to each split
+        split_sample_counts = np.zeros(3, dtype=np.float64)
+        split_pos_sample_counts = np.zeros(3, dtype=np.float64)
+        split_patient_counts = np.zeros(3, dtype=np.float64)
 
-    split_patients: list[list[int]] = [[], [], []] # patient IDs assigned to each split
-    split_sample_counts = np.zeros(3, dtype=np.float64)
-    split_pos_sample_counts = np.zeros(3, dtype=np.float64)
-    split_patient_counts = np.zeros(3, dtype=np.float64)
+        for idx, (patient, patient_count, patient_label) in enumerate(patient_stats): # iterate over patients in order of decreasing sample count
+            remaining = n_patients - idx
+            empty_splits = [i for i in range(3) if len(split_patients[i]) == 0]
+            if len(empty_splits) == remaining:
+                candidate_splits = empty_splits
+            else:
+                candidate_splits = [0, 1, 2]
 
-    for idx, (patient, patient_count, patient_label) in enumerate(patient_stats): # iterate over patients in order of decreasing sample count
-        remaining = n_patients - idx
-        empty_splits = [i for i in range(3) if len(split_patients[i]) == 0]
-        if len(empty_splits) == remaining:
-            candidate_splits = empty_splits
-        else:
-            candidate_splits = [0, 1, 2]
+            best_split = None
+            best_score = None
 
-        best_split = None
-        best_score = None
+            for split_id in candidate_splits: # for each split, compute hypothetical new sample counts and score based on distance from target, then assign patient to best split
+                new_sample_counts = split_sample_counts.copy()
+                new_sample_counts[split_id] += float(patient_count)
+                new_patient_counts = split_patient_counts.copy()
+                new_patient_counts[split_id] += 1.0
 
-        for split_id in candidate_splits: # for each split, compute hypothetical new sample counts and score based on distance from target, then assign patient to best split
-            new_sample_counts = split_sample_counts.copy()
-            new_sample_counts[split_id] += float(patient_count)
-            new_patient_counts = split_patient_counts.copy()
-            new_patient_counts[split_id] += 1.0
+                sample_score = np.abs(new_sample_counts - target_samples) / np.maximum(target_samples, 1.0)
+                score = float(sample_score.sum())
 
-            sample_score = np.abs(new_sample_counts - target_samples) / np.maximum(target_samples, 1.0)
-            score = float(sample_score.sum())
+                patient_score = np.abs(new_patient_counts - target_patients) / np.maximum(target_patients, 1.0)
+                score += 0.6 * float(patient_score.sum())
 
-            patient_score = np.abs(new_patient_counts - target_patients) / np.maximum(target_patients, 1.0)
-            score += 0.6 * float(patient_score.sum())
+                if stratify:
+                    new_pos_counts = split_pos_sample_counts.copy()
+                    new_pos_counts[split_id] += float(patient_count if patient_label == 1 else 0)
+                    pos_score = np.abs(new_pos_counts - target_pos_samples) / np.maximum(target_pos_samples, 1.0)
+                    score += 1.5 * float(pos_score.sum())
 
-            if stratify:
-                new_pos_counts = split_pos_sample_counts.copy()
-                new_pos_counts[split_id] += float(patient_count if patient_label == 1 else 0)
-                pos_score = np.abs(new_pos_counts - target_pos_samples) / np.maximum(target_pos_samples, 1.0)
-                score += 1.5 * float(pos_score.sum())
+                # Tiny jitter avoids deterministic bias toward lower-index splits on exact ties.
+                score += float(rng.uniform(0.0, 1e-12))
 
-            # Tiny jitter avoids deterministic bias toward lower-index splits on exact ties.
-            score += float(rng.uniform(0.0, 1e-12))
+                # best split is determined with an heuristic score based on distance from target sample counts, 
+                # with optional stratification and secondary balancing based on patient counts to avoid extreme imbalances when patients have many samples.
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_split = split_id
 
-            # best split is determined with an heuristic score based on distance from target sample counts, 
-            # with optional stratification and secondary balancing based on patient counts to avoid extreme imbalances when patients have many samples.
-            if best_score is None or score < best_score:
-                best_score = score
-                best_split = split_id
+            assert best_split is not None
+            split_patients[best_split].append(patient)
+            split_sample_counts[best_split] += float(patient_count)
+            split_patient_counts[best_split] += 1.0
+            if patient_label == 1:
+                split_pos_sample_counts[best_split] += float(patient_count)
 
-        assert best_split is not None
-        split_patients[best_split].append(patient)
-        split_sample_counts[best_split] += float(patient_count)
-        split_patient_counts[best_split] += 1.0
-        if patient_label == 1:
-            split_pos_sample_counts[best_split] += float(patient_count)
+        if any(len(x) == 0 for x in split_patients):
+            raise ValueError("Unable to create train/val/test split with at least one patient per split")
 
-    if any(len(x) == 0 for x in split_patients):
-        raise ValueError("Unable to create train/val/test split with at least one patient per split")
+        train_patients = torch.as_tensor(split_patients[0], dtype=patients.dtype)
+        val_patients = torch.as_tensor(split_patients[1], dtype=patients.dtype)
+        test_patients = torch.as_tensor(split_patients[2], dtype=patients.dtype)
+    elif method == "naive":
+        # Simple random split by patient without balancing heuristics (for comparison)
+        rng.shuffle(unique_patients)
+        n_train = int(train_fraction * n_patients)
+        n_val = int(val_fraction * n_patients)
 
-    train_patients = torch.as_tensor(split_patients[0], dtype=patients.dtype)
-    val_patients = torch.as_tensor(split_patients[1], dtype=patients.dtype)
-    test_patients = torch.as_tensor(split_patients[2], dtype=patients.dtype)
-
+        train_patients = torch.as_tensor(unique_patients[:n_train], dtype=patients.dtype)
+        val_patients = torch.as_tensor(unique_patients[n_train:n_train + n_val], dtype=patients.dtype)
+        test_patients = torch.as_tensor(unique_patients[n_train + n_val:], dtype=patients.dtype)
+        
     train_indices = torch.nonzero(torch.isin(patients, train_patients), as_tuple=False).squeeze(1)
     val_indices = torch.nonzero(torch.isin(patients, val_patients), as_tuple=False).squeeze(1)
     test_indices = torch.nonzero(torch.isin(patients, test_patients), as_tuple=False).squeeze(1)

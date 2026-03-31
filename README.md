@@ -65,7 +65,7 @@ Config keys in configs/resnet18_baseline.toml:
 
 ```toml
 [split]
-method = "heuristic_group_holdout"
+method = "heuristic_group_holdout" or "naive"
 seed = 42
 train_fraction = 0.70
 val_fraction = 0.15
@@ -73,10 +73,9 @@ test_fraction = 0.15
 stratify = true
 save_artifact = true
 ```
-
-Notes:
-- fractions are targets on sample counts, while assignment is constrained by whole-patient groups
-- exact fraction match is not always possible when patient sample counts are highly unbalanced
+method:
+- heuristic: try to balance sample stratification and patient fraction and sample fraction
+- naive: give specified fractions of patients to each split
 
 ## Run Artifacts
 Each training run creates an output folder under outputs/ with:

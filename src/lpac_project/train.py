@@ -57,7 +57,7 @@ def main():
     val_fraction = float(split_cfg["val_fraction"])
     test_fraction = float(split_cfg["test_fraction"])
     stratify = bool(split_cfg.get("stratify", True))
-    split_method = str(split_cfg.get("method", "heuristic_group_holdout"))
+    split_method = str(split_cfg.get("method", "heuristic_balanced"))
     save_split_artifact_flag = bool(split_cfg.get("save_artifact", True))
 
     seed_everything(seed)
@@ -79,6 +79,7 @@ def main():
         test_fraction=test_fraction,
         seed=seed,
         stratify=stratify,
+        method=split_method
     )
 
     if save_split_artifact_flag:
