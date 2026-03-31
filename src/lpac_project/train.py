@@ -42,6 +42,41 @@ def compute_class_weights(labels: torch.Tensor, num_classes: int) -> torch.Tenso
     return weights
 
 
+def build_scheduler(
+    optimizer: torch.optim.Optimizer,
+    train_cfg: dict,
+    epochs: int,
+) -> tuple[torch.optim.lr_scheduler.LRScheduler | torch.optim.lr_scheduler.ReduceLROnPlateau | None, str]:
+    scheduler_cfg = train_cfg.get("scheduler", {})
+    scheduler_name = str(scheduler_cfg.get("name", "none")).lower()
+
+    if scheduler_name == "none":
+        return None, "none"
+
+    if scheduler_name == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode=str(scheduler_cfg.get("mode", "max")),
+            factor=float(scheduler_cfg.get("factor", 0.5)),
+            patience=int(scheduler_cfg.get("patience", 2)),
+            min_lr=float(scheduler_cfg.get("min_lr", 0.0)),
+        )
+        return scheduler, "plateau"
+
+    if scheduler_name == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, int(scheduler_cfg.get("t_max", epochs))),
+            eta_min=float(scheduler_cfg.get("eta_min", 0.0)),
+        )
+        return scheduler, "cosine"
+
+    raise ValueError(
+        f"Unsupported scheduler '{scheduler_name}'. "
+        "Supported values are: none, plateau, cosine."
+    )
+
+
 def main():
     args = parse_args()
 
@@ -156,10 +191,17 @@ def main():
         weight_decay=float(train_cfg.get("weight_decay", 0.0)),
     )
 
+    epochs = 1 if args.smoke else int(train_cfg["epochs"])
+
+    scheduler, scheduler_name = build_scheduler(
+        optimizer=optimizer,
+        train_cfg=train_cfg,
+        epochs=epochs,
+    )
+
     use_amp = bool(train_cfg.get("use_amp", True))
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")
 
-    epochs = 1 if args.smoke else int(train_cfg["epochs"])
     metrics_csv = run_dir / "metrics.csv"
 
     best_val_bal_acc = float("-inf")
@@ -185,6 +227,14 @@ def main():
             use_amp=use_amp,
         )
 
+        if scheduler is not None:
+            if scheduler_name == "plateau":
+                scheduler.step(val_metrics["balanced_accuracy"])
+            else:
+                scheduler.step()
+
+        current_lr = float(optimizer.param_groups[0]["lr"])
+
         row = {
             "epoch": epoch,
             "train_loss": train_metrics["loss"],
@@ -193,6 +243,7 @@ def main():
             "val_loss": val_metrics["loss"],
             "val_accuracy": val_metrics["accuracy"],
             "val_balanced_accuracy": val_metrics["balanced_accuracy"],
+            "lr": current_lr,
         }
         append_metrics_row(metrics_csv, row)
 
@@ -208,6 +259,7 @@ def main():
             f"acc={val_metrics['accuracy']:.4f} "
             f"bal_acc={val_metrics['balanced_accuracy']:.4f}"
         )
+        print(f"lr={current_lr:.6g}")
 
         checkpoint = {
             "epoch": epoch,

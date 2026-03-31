@@ -32,3 +32,12 @@ lr = 1e-5
 weight_decay = 1e-4
 use_amp = true
 use_class_weights = true
+
+[train.scheduler]
+name = "none" # supported: none, plateau, cosine
+mode = "max" # used by plateau (monitor is val balanced accuracy)
+factor = 0.5
+patience = 2
+min_lr = 1e-7
+t_max = 5 # used by cosine
+eta_min = 1e-7

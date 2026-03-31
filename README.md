@@ -65,7 +65,7 @@ Config keys in configs/resnet18_baseline.toml:
 
 ```toml
 [split]
-method = "heuristic_group_holdout" or "naive"
+method = "heuristic_balanced" # or "naive"
 seed = 42
 train_fraction = 0.70
 val_fraction = 0.15
@@ -74,8 +74,28 @@ stratify = true
 save_artifact = true
 ```
 method:
-- heuristic: try to balance sample stratification and patient fraction and sample fraction
+- heuristic_balanced: try to balance sample stratification and patient fraction and sample fraction
 - naive: give specified fractions of patients to each split
+
+## Model Selection And Scheduler
+Best checkpoint selection is based on validation balanced accuracy.
+
+Scheduler is configured from the train section:
+
+```toml
+[train]
+epochs = 5
+lr = 1e-5
+
+[train.scheduler]
+name = "none" # supported: none, plateau, cosine
+mode = "max" # used by plateau, monitor is val balanced accuracy
+factor = 0.5
+patience = 2
+min_lr = 1e-7
+t_max = 5 # used by cosine
+eta_min = 1e-7
+```
 
 ## Run Artifacts
 Each training run creates an output folder under outputs/ with:
