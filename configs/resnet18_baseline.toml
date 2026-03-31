@@ -3,13 +3,13 @@ name = "resnet18_baseline"
 output_root = "outputs"
 
 [data]
-dataset_path = "data/dataset.pt"
+dataset_path = "data/imgNum_919_imgSize_448_03-31_MC.pt"
 num_workers = 0
 pin_memory = true
 
 [split]
 method = "heuristic_group_holdout"
-seed = 42
+seed = 53100
 train_fraction = 0.70
 val_fraction = 0.15
 test_fraction = 0.15
@@ -23,12 +23,12 @@ random_horizontal_flip_p = 0.0
 name = "resnet18"
 num_classes = 2
 pretrained = true
-dropout = 0.0
+dropout = 0.2
 
 [train]
 batch_size = 1
 epochs = 5
-lr = 1e-4
+lr = 1e-5
 weight_decay = 1e-4
 use_amp = true
-use_class_weights = false
+use_class_weights = true

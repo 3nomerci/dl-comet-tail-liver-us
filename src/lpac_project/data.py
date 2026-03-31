@@ -187,13 +187,13 @@ def patient_split_indices(
             score = float(sample_score.sum())
 
             patient_score = np.abs(new_patient_counts - target_patients) / np.maximum(target_patients, 1.0)
-            score += 0.25 * float(patient_score.sum())
+            score += 0.6 * float(patient_score.sum())
 
             if stratify:
                 new_pos_counts = split_pos_sample_counts.copy()
                 new_pos_counts[split_id] += float(patient_count if patient_label == 1 else 0)
                 pos_score = np.abs(new_pos_counts - target_pos_samples) / np.maximum(target_pos_samples, 1.0)
-                score += 2.0 * float(pos_score.sum())
+                score += 1.5 * float(pos_score.sum())
 
             # Tiny jitter avoids deterministic bias toward lower-index splits on exact ties.
             score += float(rng.uniform(0.0, 1e-12))
