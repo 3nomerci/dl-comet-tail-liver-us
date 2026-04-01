@@ -27,8 +27,8 @@ dropout = 0.2
 
 [train]
 batch_size = 16
-epochs = 5
-lr = 1e-5
+epochs = 15
+lr = 1e-6
 weight_decay = 1e-4
 use_amp = true
 use_class_weights = true
