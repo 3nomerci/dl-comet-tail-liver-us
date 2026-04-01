@@ -26,12 +26,15 @@ pretrained = true
 dropout = 0.2
 
 [train]
-batch_size = 1
+batch_size = 16
 epochs = 5
 lr = 1e-5
 weight_decay = 1e-4
 use_amp = true
 use_class_weights = true
+head_warmup_epochs = 1
+head_warmup_lr = 1e-5
+head_warmup_weight_decay = 1e-4
 
 [train.scheduler]
 name = "none" # supported: none, plateau, cosine

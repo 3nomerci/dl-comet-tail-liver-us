@@ -80,12 +80,18 @@ method:
 ## Model Selection And Scheduler
 Best checkpoint selection is based on validation balanced accuracy.
 
+When model.pretrained is true, training runs a head-only warmup phase before full fine-tuning.
+Warmup can be controlled from the train section.
+
 Scheduler is configured from the train section:
 
 ```toml
 [train]
 epochs = 5
 lr = 1e-5
+head_warmup_epochs = 1
+head_warmup_lr = 1e-5
+head_warmup_weight_decay = 1e-4
 
 [train.scheduler]
 name = "none" # supported: none, plateau, cosine

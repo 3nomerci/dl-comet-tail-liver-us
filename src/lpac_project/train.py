@@ -16,7 +16,7 @@ from .data import (
     save_split_artifact,
 )
 from .engine import run_eval_epoch, run_train_epoch
-from .models.registry import build_model, get_model_normalization
+from .models.registry import build_model, get_model_head_module, get_model_normalization
 from .utils import (
     append_metrics_row,
     copy_file,
@@ -75,6 +75,65 @@ def build_scheduler(
         f"Unsupported scheduler '{scheduler_name}'. "
         "Supported values are: none, plateau, cosine."
     )
+
+
+def set_requires_grad(module: nn.Module, enabled: bool) -> None:
+    for parameter in module.parameters():
+        parameter.requires_grad = enabled
+
+
+def log_epoch_and_save_checkpoint(
+    run_dir: Path,
+    metrics_csv: Path,
+    epoch: int,
+    train_metrics: dict[str, float],
+    val_metrics: dict[str, float],
+    optimizer: torch.optim.Optimizer,
+    best_val_bal_acc: float,
+    config: dict,
+    model: nn.Module,
+) -> float:
+    current_lr = float(optimizer.param_groups[0]["lr"])
+
+    row = {
+        "epoch": epoch,
+        "train_loss": train_metrics["loss"],
+        "train_accuracy": train_metrics["accuracy"],
+        "train_balanced_accuracy": train_metrics["balanced_accuracy"],
+        "val_loss": val_metrics["loss"],
+        "val_accuracy": val_metrics["accuracy"],
+        "val_balanced_accuracy": val_metrics["balanced_accuracy"],
+        "lr": current_lr,
+    }
+    append_metrics_row(metrics_csv, row)
+
+    print(
+        "train "
+        f"loss={train_metrics['loss']:.4f} "
+        f"acc={train_metrics['accuracy']:.4f} "
+        f"bal_acc={train_metrics['balanced_accuracy']:.4f}"
+    )
+    print(
+        "val   "
+        f"loss={val_metrics['loss']:.4f} "
+        f"acc={val_metrics['accuracy']:.4f} "
+        f"bal_acc={val_metrics['balanced_accuracy']:.4f}"
+    )
+    print(f"lr={current_lr:.6g}")
+
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "config": config,
+    }
+    torch.save(checkpoint, run_dir / "last_model.pt")
+
+    if val_metrics["balanced_accuracy"] >= best_val_bal_acc:
+        best_val_bal_acc = val_metrics["balanced_accuracy"]
+        torch.save(checkpoint, run_dir / "best_model.pt")
+
+    return best_val_bal_acc
 
 
 def main():
@@ -185,19 +244,17 @@ def main():
     else:
         criterion = nn.CrossEntropyLoss()
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(train_cfg["lr"]),
-        weight_decay=float(train_cfg.get("weight_decay", 0.0)),
-    )
-
     epochs = 1 if args.smoke else int(train_cfg["epochs"])
+    pretrained = bool(model_cfg.get("pretrained", True))
+    default_warmup_epochs = 1 if pretrained and not args.smoke else 0
+    head_warmup_epochs = int(train_cfg.get("head_warmup_epochs", default_warmup_epochs))
 
-    scheduler, scheduler_name = build_scheduler(
-        optimizer=optimizer,
-        train_cfg=train_cfg,
-        epochs=epochs,
-    )
+    if head_warmup_epochs < 0:
+        raise ValueError("head_warmup_epochs must be >= 0")
+
+    if not pretrained and head_warmup_epochs > 0:
+        print("Head warmup requested but model is not pretrained. Skipping head warmup.")
+        head_warmup_epochs = 0
 
     use_amp = bool(train_cfg.get("use_amp", True))
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")
@@ -206,8 +263,73 @@ def main():
 
     best_val_bal_acc = float("-inf")
 
+    total_epochs = head_warmup_epochs + epochs
+    global_epoch = 0
+
+    if head_warmup_epochs > 0:
+        print(f"\nStarting head warmup for {head_warmup_epochs} epoch(s) because pretrained=True")
+
+        head_module = get_model_head_module(model, model_cfg)
+        set_requires_grad(model, enabled=False)
+        set_requires_grad(head_module, enabled=True)
+
+        warmup_optimizer = torch.optim.AdamW(
+            head_module.parameters(),
+            lr=float(train_cfg.get("head_warmup_lr", train_cfg["lr"])),
+            weight_decay=float(train_cfg.get("head_warmup_weight_decay", train_cfg.get("weight_decay", 0.0))),
+        )
+
+        for warmup_epoch in range(1, head_warmup_epochs + 1):
+            global_epoch += 1
+            print(f"\nWarmup Epoch {warmup_epoch}/{head_warmup_epochs} (global {global_epoch}/{total_epochs})")
+
+            train_metrics = run_train_epoch(
+                model=model,
+                loader=train_loader,
+                criterion=criterion,
+                optimizer=warmup_optimizer,
+                device=device,
+                scaler=scaler,
+                use_amp=use_amp,
+            )
+
+            val_metrics = run_eval_epoch(
+                model=model,
+                loader=val_loader,
+                criterion=criterion,
+                device=device,
+                use_amp=use_amp,
+            )
+
+            best_val_bal_acc = log_epoch_and_save_checkpoint(
+                run_dir=run_dir,
+                metrics_csv=metrics_csv,
+                epoch=global_epoch,
+                train_metrics=train_metrics,
+                val_metrics=val_metrics,
+                optimizer=warmup_optimizer,
+                best_val_bal_acc=best_val_bal_acc,
+                config=config,
+                model=model,
+            )
+
+        set_requires_grad(model, enabled=True)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(train_cfg["lr"]),
+        weight_decay=float(train_cfg.get("weight_decay", 0.0)),
+    )
+
+    scheduler, scheduler_name = build_scheduler(
+        optimizer=optimizer,
+        train_cfg=train_cfg,
+        epochs=epochs,
+    )
+
     for epoch in range(1, epochs + 1):
-        print(f"\nEpoch {epoch}/{epochs}")
+        global_epoch += 1
+        print(f"\nEpoch {epoch}/{epochs} (global {global_epoch}/{total_epochs})")
 
         train_metrics = run_train_epoch(
             model=model,
@@ -233,45 +355,17 @@ def main():
             else:
                 scheduler.step()
 
-        current_lr = float(optimizer.param_groups[0]["lr"])
-
-        row = {
-            "epoch": epoch,
-            "train_loss": train_metrics["loss"],
-            "train_accuracy": train_metrics["accuracy"],
-            "train_balanced_accuracy": train_metrics["balanced_accuracy"],
-            "val_loss": val_metrics["loss"],
-            "val_accuracy": val_metrics["accuracy"],
-            "val_balanced_accuracy": val_metrics["balanced_accuracy"],
-            "lr": current_lr,
-        }
-        append_metrics_row(metrics_csv, row)
-
-        print(
-            "train "
-            f"loss={train_metrics['loss']:.4f} "
-            f"acc={train_metrics['accuracy']:.4f} "
-            f"bal_acc={train_metrics['balanced_accuracy']:.4f}"
+        best_val_bal_acc = log_epoch_and_save_checkpoint(
+            run_dir=run_dir,
+            metrics_csv=metrics_csv,
+            epoch=global_epoch,
+            train_metrics=train_metrics,
+            val_metrics=val_metrics,
+            optimizer=optimizer,
+            best_val_bal_acc=best_val_bal_acc,
+            config=config,
+            model=model,
         )
-        print(
-            "val   "
-            f"loss={val_metrics['loss']:.4f} "
-            f"acc={val_metrics['accuracy']:.4f} "
-            f"bal_acc={val_metrics['balanced_accuracy']:.4f}"
-        )
-        print(f"lr={current_lr:.6g}")
-
-        checkpoint = {
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "config": config,
-        }
-        torch.save(checkpoint, run_dir / "last_model.pt")
-
-        if val_metrics["balanced_accuracy"] >= best_val_bal_acc:
-            best_val_bal_acc = val_metrics["balanced_accuracy"]
-            torch.save(checkpoint, run_dir / "best_model.pt")
 
     best_checkpoint = torch.load(run_dir / "best_model.pt", map_location=device, weights_only=False)
     model.load_state_dict(best_checkpoint["model_state_dict"])

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from torch import nn
+
 from .resnet import build_resnet18, get_resnet18_normalization
 
 
@@ -29,3 +31,12 @@ def get_model_normalization(model_cfg: dict[str, Any]) -> dict[str, list[float]]
         return get_resnet18_normalization(pretrained=bool(model_cfg.get("pretrained", True)))
 
     raise ValueError(f"Unsupported model name: {name}")
+
+
+def get_model_head_module(model: nn.Module, model_cfg: dict[str, Any]) -> nn.Module:
+    name = model_cfg["name"].lower()
+
+    if name == "resnet18":
+        return model.fc
+
+    raise ValueError(f"Unsupported model name for head warmup: {name}")
