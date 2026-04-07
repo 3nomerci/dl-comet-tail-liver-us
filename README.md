@@ -1,12 +1,7 @@
 # LPAC_project
 
 LPAC_project is a config-driven PyTorch repository for binary medical image classification experiments.
-The current baseline is ResNet18 and the core protocol requirement is patient-level splitting with no leakage.
-
-## Project Goals
-- Build a credible, reproducible baseline with simple engineering.
-- Keep the repository model-agnostic (ResNet18 is only the first model).
-- Prioritize experimental correctness over framework complexity.
+The current baseline is ResNet18.
 
 ## Dataset Assumptions
 Data preparation is done offline. Training code consumes a packed dataset file, for example data/dataset.pt.
@@ -24,10 +19,10 @@ Expected structure:
 ```
 
 Current packed baseline assumptions:
-- images are already standardized to 3 x 768 x 768
+- images are already standardized to 3 x H x W 
 - labels and patients are torch.long
 - patient IDs are integer-valued
-- baseline packing already applied aspect-ratio resize, center padding, and min-max normalization
+- offline dataset preparation already applied aspect-ratio resize, center padding, and min-max normalization
 
 ## Setup
 
@@ -74,11 +69,13 @@ stratify = true
 save_artifact = true
 ```
 method:
-- heuristic_balanced: try to balance sample stratification and patient fraction and sample fraction
+- heuristic_balanced: try to balance sample level class stratification, patient fraction, sample fraction to match the specified fractions.
 - naive: give specified fractions of patients to each split
 
+Hint: running in smoke mode will generate the split report (if active), which can be inspected before training.
+
 ## Model Selection And Scheduler
-Best checkpoint selection is based on validation balanced accuracy.
+Best checkpoint selection is based on validation balanced accuracy. The best checkpoint is used to produce final test metrics.
 
 When model.pretrained is true, training runs a head-only warmup phase before full fine-tuning.
 Warmup can be controlled from the train section.
@@ -112,16 +109,6 @@ Each training run creates an output folder under outputs/ with:
 - test_metrics.json: final test metrics from best checkpoint
 - split.json: split indices and patient IDs per split
 - split_summary.json: split audit summary (counts, fractions, class counts, metadata)
-
-## Local vs Cluster Workflow
-Local machine:
-- run tests
-- run smoke/debug jobs
-- validate configs
-
-Cluster:
-- run full training and longer experiments
-- use robust transfer for data and code (rsync preferred)
 
 ## Repository Structure
 

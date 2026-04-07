@@ -370,6 +370,7 @@ def main():
     best_checkpoint = torch.load(run_dir / "best_model.pt", map_location=device, weights_only=False)
     model.load_state_dict(best_checkpoint["model_state_dict"])
 
+    # Test metrics are obtained from the model with the best validation balanced accuracy
     test_metrics = run_eval_epoch(
         model=model,
         loader=test_loader,
