@@ -3,7 +3,7 @@ name = "resnet18_baseline"
 output_root = "outputs"
 
 [data]
-dataset_path = "data/imgNum_1106_imgSize_224_03-31.pt"
+dataset_path = "data/imgNum_770_imgSize_448_04-07_MC.pt"
 num_workers = 0
 pin_memory = true
 
