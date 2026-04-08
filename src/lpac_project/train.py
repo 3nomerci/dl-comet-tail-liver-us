@@ -25,6 +25,8 @@ from .utils import (
     save_json,
     seed_everything,
     select_device,
+    expand_configurations,
+    apply_hyperparameters_to_config
 )
 
 
@@ -127,7 +129,7 @@ def log_epoch_and_save_checkpoint(
         "optimizer_state_dict": optimizer.state_dict(),
         "config": config,
     }
-    torch.save(checkpoint, run_dir / "last_model.pt")
+    # torch.save(checkpoint, run_dir / "last_model.pt") # Optionally save the last model checkpoint (uncomment if desired)
 
     if val_metrics["balanced_accuracy"] >= best_val_bal_acc:
         best_val_bal_acc = val_metrics["balanced_accuracy"]
@@ -135,88 +137,40 @@ def log_epoch_and_save_checkpoint(
 
     return best_val_bal_acc
 
-
-def main():
-    args = parse_args()
-
-    config = load_config(args.config)
-    run_cfg = config["run"]
+def run_training_trial(
+    *,
+    config: dict,
+    pack: dict,
+    train_idx,
+    val_idx,
+    test_idx,
+    device: torch.device,
+    run_dir: Path,
+    smoke: bool = False,
+    evaluate_test: bool = True,
+) -> dict:
     data_cfg = config["data"]
-    split_cfg = config.get("split", {})
     model_cfg = config["model"]
     train_cfg = config["train"]
-
-    seed = int(split_cfg["seed"])
-    train_fraction = float(split_cfg["train_fraction"])
-    val_fraction = float(split_cfg["val_fraction"])
-    test_fraction = float(split_cfg["test_fraction"])
-    stratify = bool(split_cfg.get("stratify", True))
-    split_method = str(split_cfg.get("method", "heuristic_balanced"))
-    save_split_artifact_flag = bool(split_cfg.get("save_artifact", True))
-
-    seed_everything(seed)
-
-    device = select_device(args.device)
-    run_dir = make_run_dir(run_cfg["output_root"], run_cfg["name"])
-    copy_file(args.config, run_dir / "config.toml")
-
-    print(f"Using device: {device}")
-    print(f"Run directory: {run_dir}")
-
-    pack = load_pack(data_cfg["dataset_path"])
-
-    train_idx, val_idx, test_idx = patient_split_indices(
-        patients=pack["patients"],
-        labels=pack["labels"],
-        train_fraction=train_fraction,
-        val_fraction=val_fraction,
-        test_fraction=test_fraction,
-        seed=seed,
-        stratify=stratify,
-        method=split_method
-    )
-
-    if save_split_artifact_flag:
-        # NOTE: even if args.smoke is enabled the split artifact is saved with the full indices, 
-        # as the smoke mode only limits the indices used in training/validation/test loaders, not the actual split saved.
-        save_split_artifact(
-            output_path=run_dir / "split.json",
-            summary_output_path=run_dir / "split_summary.json",
-            patients=pack["patients"],
-            labels=pack["labels"],
-            train_indices=train_idx,
-            val_indices=val_idx,
-            test_indices=test_idx,
-            train_fraction=train_fraction,
-            val_fraction=val_fraction,
-            test_fraction=test_fraction,
-            seed=seed,
-            method=split_method,
-            stratify=stratify,
-        )
-
-    if args.smoke:
-        train_idx = limit_indices(train_idx, max_items=100, seed=seed + 1)
-        val_idx = limit_indices(val_idx, max_items=100, seed=seed + 2)
-        test_idx = limit_indices(test_idx, max_items=100, seed=seed + 3)
-
+    
+    run_dir.mkdir(parents=True, exist_ok=True)
+    
     normalization = get_model_normalization(model_cfg)
     transform_cfg = data_cfg.get("transform", {})
 
     train_transform = build_tensor_transform(
         mean=normalization["mean"] if normalization else None,
         std=normalization["std"] if normalization else None,
-        random_horizontal_flip_p=float(transform_cfg.get("random_horizontal_flip_p", 0.0)),  # try to get the flip probability from config, default to 0.0
+        random_horizontal_flip_p=float(transform_cfg.get("random_horizontal_flip_p", 0.0)),
     )
     eval_transform = build_tensor_transform(
         mean=normalization["mean"] if normalization else None,
         std=normalization["std"] if normalization else None,
-        random_horizontal_flip_p=0.0,  # no augmentation during evaluation
+        random_horizontal_flip_p=0.0,
     )
 
     train_dataset = PackedPatientDataset(pack, indices=train_idx, transform=train_transform)
     val_dataset = PackedPatientDataset(pack, indices=val_idx, transform=eval_transform)
-    test_dataset = PackedPatientDataset(pack, indices=test_idx, transform=eval_transform)
 
     num_workers = int(data_cfg.get("num_workers", 0))
     pin_memory = bool(data_cfg.get("pin_memory", device.type == "cuda"))
@@ -230,9 +184,10 @@ def main():
 
     train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
-    test_loader = DataLoader(test_dataset, shuffle=False, **loader_kwargs)
-
-    model = build_model(model_cfg).to(device)
+    test_loader = None
+    if evaluate_test:
+        test_dataset = PackedPatientDataset(pack, indices=test_idx, transform=eval_transform)
+        test_loader = DataLoader(test_dataset, shuffle=False, **loader_kwargs)
 
     if bool(train_cfg.get("use_class_weights", False)):
         train_labels = pack["labels"][train_idx]
@@ -244,9 +199,9 @@ def main():
     else:
         criterion = nn.CrossEntropyLoss()
 
-    epochs = 1 if args.smoke else int(train_cfg["epochs"])
+    epochs = 1 if smoke else int(train_cfg["epochs"])
     pretrained = bool(model_cfg.get("pretrained", True))
-    default_warmup_epochs = 1 if pretrained and not args.smoke else 0
+    default_warmup_epochs = 1 if pretrained and not smoke else 0
     head_warmup_epochs = int(train_cfg.get("head_warmup_epochs", default_warmup_epochs))
 
     if head_warmup_epochs < 0:
@@ -262,9 +217,10 @@ def main():
     metrics_csv = run_dir / "metrics.csv"
 
     best_val_bal_acc = float("-inf")
-
     total_epochs = head_warmup_epochs + epochs
     global_epoch = 0
+
+    model = build_model(model_cfg).to(device)
 
     if head_warmup_epochs > 0:
         print(f"\nStarting head warmup for {head_warmup_epochs} epoch(s) because pretrained=True")
@@ -276,7 +232,12 @@ def main():
         warmup_optimizer = torch.optim.AdamW(
             head_module.parameters(),
             lr=float(train_cfg.get("head_warmup_lr", train_cfg["lr"])),
-            weight_decay=float(train_cfg.get("head_warmup_weight_decay", train_cfg.get("weight_decay", 0.0))),
+            weight_decay=float(
+                train_cfg.get(
+                    "head_warmup_weight_decay",
+                    train_cfg.get("weight_decay", 0.0),
+                )
+            ),
         )
 
         for warmup_epoch in range(1, head_warmup_epochs + 1):
@@ -367,10 +328,119 @@ def main():
             model=model,
         )
 
-    best_checkpoint = torch.load(run_dir / "best_model.pt", map_location=device, weights_only=False)
+    best_checkpoint = torch.load(
+        run_dir / "best_model.pt",
+        map_location=device,
+        weights_only=False,
+    )
     model.load_state_dict(best_checkpoint["model_state_dict"])
 
-    # Test metrics are obtained from the model with the best validation balanced accuracy
+    result = {
+        "config": config,
+        "run_dir": run_dir,
+        "best_model_path": run_dir / "best_model.pt",
+        "last_model_path": run_dir / "last_model.pt",
+        "metrics_csv": metrics_csv,
+        "best_val_balanced_accuracy": best_val_bal_acc,
+        "test_metrics": None,
+    }
+
+    if evaluate_test:
+        if test_loader is None:
+            raise RuntimeError("test_loader is None while evaluate_test=True")
+
+        test_metrics = run_eval_epoch(
+            model=model,
+            loader=test_loader,
+            criterion=criterion,
+            device=device,
+            use_amp=use_amp,
+        )
+
+        save_json(
+            run_dir / "test_metrics.json",
+            {
+                "best_val_balanced_accuracy": best_val_bal_acc,
+                "test_loss": test_metrics["loss"],
+                "test_accuracy": test_metrics["accuracy"],
+                "test_balanced_accuracy": test_metrics["balanced_accuracy"],
+                "test_tn": test_metrics["tn"],
+                "test_fp": test_metrics["fp"],
+                "test_fn": test_metrics["fn"],
+                "test_tp": test_metrics["tp"],
+            },
+        )
+
+        print("\nFinal test metrics")
+        print(
+            f"loss={test_metrics['loss']:.4f} "
+            f"acc={test_metrics['accuracy']:.4f} "
+            f"bal_acc={test_metrics['balanced_accuracy']:.4f}"
+        )
+        print(f"Artifacts saved in: {run_dir}")
+
+        result["test_metrics"] = test_metrics
+
+    return result
+
+def evaluate_saved_model_on_test(
+    *,
+    config: dict,
+    pack: dict,
+    train_idx,
+    test_idx,
+    device: torch.device,
+    checkpoint_path: Path,
+    output_path: Path,
+    best_val_bal_acc: float,
+) -> dict:
+    data_cfg = config["data"]
+    model_cfg = config["model"]
+    train_cfg = config["train"]
+
+    normalization = get_model_normalization(model_cfg)
+
+    eval_transform = build_tensor_transform(
+        mean=normalization["mean"] if normalization else None,
+        std=normalization["std"] if normalization else None,
+        random_horizontal_flip_p=0.0,
+    )
+
+    test_dataset = PackedPatientDataset(pack, indices=test_idx, transform=eval_transform)
+
+    num_workers = int(data_cfg.get("num_workers", 0))
+    pin_memory = bool(data_cfg.get("pin_memory", device.type == "cuda"))
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=int(train_cfg["batch_size"]),
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
+    )
+
+    if bool(train_cfg.get("use_class_weights", False)):
+        train_labels = pack["labels"][train_idx]
+        class_weights = compute_class_weights(
+            labels=train_labels,
+            num_classes=int(model_cfg["num_classes"]),
+        ).to(device)
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+    else:
+        criterion = nn.CrossEntropyLoss()
+
+    model = build_model(model_cfg).to(device)
+
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=False,
+    )
+    model.load_state_dict(checkpoint["model_state_dict"])
+
+    use_amp = bool(train_cfg.get("use_amp", True))
+
     test_metrics = run_eval_epoch(
         model=model,
         loader=test_loader,
@@ -380,7 +450,7 @@ def main():
     )
 
     save_json(
-        run_dir / "test_metrics.json",
+        output_path,
         {
             "best_val_balanced_accuracy": best_val_bal_acc,
             "test_loss": test_metrics["loss"],
@@ -393,7 +463,180 @@ def main():
         },
     )
 
-    print("\nFinal test metrics")
+    return test_metrics
+
+def main():
+    args = parse_args()
+
+    config = load_config(args.config)
+    run_cfg = config["run"]
+    data_cfg = config["data"]
+    split_cfg = config.get("split", {})
+    hyper_cfg = config.get("hyperparameters_selection", {})
+
+    seed = int(split_cfg["seed"])
+    train_fraction = float(split_cfg["train_fraction"])
+    val_fraction = float(split_cfg["val_fraction"])
+    test_fraction = float(split_cfg["test_fraction"])
+    stratify = bool(split_cfg.get("stratify", True))
+    split_method = str(split_cfg.get("method", "heuristic_balanced"))
+    save_split_artifact_flag = bool(split_cfg.get("save_artifact", True))
+
+    seed_everything(seed)
+
+    device = select_device(args.device)
+    run_dir = make_run_dir(run_cfg["output_root"], run_cfg["name"])
+    copy_file(args.config, run_dir / "config.toml")
+
+    print(f"Using device: {device}")
+    print(f"Run directory: {run_dir}")
+
+    pack = load_pack(data_cfg["dataset_path"])
+
+    train_idx, val_idx, test_idx = patient_split_indices(
+        patients=pack["patients"],
+        labels=pack["labels"],
+        train_fraction=train_fraction,
+        val_fraction=val_fraction,
+        test_fraction=test_fraction,
+        seed=seed,
+        stratify=stratify,
+        method=split_method,
+    )
+
+    if save_split_artifact_flag:
+        save_split_artifact(
+            output_path=run_dir / "split.json",
+            summary_output_path=run_dir / "split_summary.json",
+            patients=pack["patients"],
+            labels=pack["labels"],
+            train_indices=train_idx,
+            val_indices=val_idx,
+            test_indices=test_idx,
+            train_fraction=train_fraction,
+            val_fraction=val_fraction,
+            test_fraction=test_fraction,
+            seed=seed,
+            method=split_method,
+            stratify=stratify,
+        )
+
+    if args.smoke:
+        train_idx = limit_indices(train_idx, max_items=100, seed=seed + 1)
+        val_idx = limit_indices(val_idx, max_items=100, seed=seed + 2)
+        test_idx = limit_indices(test_idx, max_items=100, seed=seed + 3)
+
+    perform_hyperparameter_selection = bool(hyper_cfg.get("perform", False))
+
+    if not perform_hyperparameter_selection:
+        print("\nPerforming a single training trial with the provided configuration.")
+        run_training_trial(
+            config=config,
+            pack=pack,
+            train_idx=train_idx,
+            val_idx=val_idx,
+            test_idx=test_idx,
+            device=device,
+            run_dir=run_dir,
+            smoke=args.smoke,
+            evaluate_test=True,
+        )
+        return
+    # ELSE:
+    hyperparameter_combinations = expand_configurations(hyper_cfg)
+    if not hyperparameter_combinations:
+        raise ValueError(
+            "hyperparameters_selection.perform=True but no hyperparameter combinations were generated."
+        )
+
+    print("\nPerforming hyperparameter grid search.")
+    print(f"Number of trials: {len(hyperparameter_combinations)}")
+
+    best_result = None
+    best_combination = None
+    search_results = []
+
+    for trial_id, comb in enumerate(hyperparameter_combinations, start=1):
+        trial_seed = seed
+        seed_everything(trial_seed)
+
+        print(f"\n=== Trial {trial_id}/{len(hyperparameter_combinations)} ===")
+        print(f"  trial_seed: {trial_seed}")
+        for param_name, param_value in comb.items():
+            print(f"  {param_name}: {param_value}")
+
+        current_config = apply_hyperparameters_to_config(config, comb)
+
+        trial_run_dir = run_dir / f"trial_{trial_id:03d}"
+        trial_run_dir.mkdir(parents=True, exist_ok=False)
+
+        save_json(trial_run_dir / "hyperparameters.json", comb)
+        save_json(trial_run_dir / "resolved_config.json", current_config)
+
+        result = run_training_trial(
+            config=current_config,
+            pack=pack,
+            train_idx=train_idx,
+            val_idx=val_idx,
+            test_idx=test_idx,
+            device=device,
+            run_dir=trial_run_dir,
+            smoke=args.smoke,
+            evaluate_test=False,
+        )
+
+        trial_summary = {
+            "trial_id": trial_id,
+            "trial_seed": trial_seed,
+            "hyperparameters": comb,
+            "run_dir": str(trial_run_dir),
+            "best_val_balanced_accuracy": result["best_val_balanced_accuracy"],
+        }
+        search_results.append(trial_summary)
+
+        if (
+            best_result is None
+            or result["best_val_balanced_accuracy"] > best_result["best_val_balanced_accuracy"]
+        ):
+            best_result = result
+            best_combination = comb
+
+    if best_result is None or best_combination is None:
+        raise RuntimeError("Hyperparameter search did not produce a valid best trial.")
+
+    save_json(run_dir / "hyperparameter_search_results.json", search_results)
+    save_json(
+        run_dir / "best_hyperparameters.json",
+        {
+            "best_hyperparameters": best_combination,
+            "best_val_balanced_accuracy": best_result["best_val_balanced_accuracy"],
+            "best_run_dir": str(best_result["run_dir"]),
+            "best_model_path": str(best_result["best_model_path"]),
+        },
+    )
+
+    copy_file(best_result["best_model_path"], run_dir / "best_model.pt")
+
+    print("\nBest hyperparameter configuration:")
+    for param_name, param_value in best_combination.items():
+        print(f"  {param_name}: {param_value}")
+    print(
+        f"Best validation balanced accuracy: "
+        f"{best_result['best_val_balanced_accuracy']:.4f}"
+    )
+
+    test_metrics = evaluate_saved_model_on_test(
+        config=best_result["config"],
+        pack=pack,
+        train_idx=train_idx,
+        test_idx=test_idx,
+        device=device,
+        checkpoint_path=best_result["best_model_path"],
+        output_path=run_dir / "test_metrics.json",
+        best_val_bal_acc=best_result["best_val_balanced_accuracy"],
+    )
+
+    print("\nFinal test metrics for selected hyperparameters")
     print(
         f"loss={test_metrics['loss']:.4f} "
         f"acc={test_metrics['accuracy']:.4f} "

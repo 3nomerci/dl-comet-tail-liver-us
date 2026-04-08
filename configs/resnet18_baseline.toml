@@ -7,17 +7,17 @@ dataset_path = "data/imgNum_770_imgSize_448_04-07_MC.pt"
 num_workers = 0
 pin_memory = true
 
+[data.transform]
+random_horizontal_flip_p = 0.0
+
 [split]
 method = "naive"
 seed = 53100
 train_fraction = 0.70
 val_fraction = 0.15
 test_fraction = 0.15
-stratify = true
+stratify = true  # Note: does not work if method is naive
 save_artifact = true
-
-[data.transform]
-random_horizontal_flip_p = 0.0
 
 [model]
 name = "resnet18"
@@ -44,3 +44,12 @@ patience = 2
 min_lr = 1e-7
 t_max = 5 # used by cosine
 eta_min = 1e-7
+
+[hyperparameters_selection]
+perform = true
+cross_validation = false # not yet implemented
+k_folds = 3 # onlys used if cross_validation is true
+
+[hyperparameters_selection.values] # expanded using cartesian_product
+lr = [5e-7, 1e-6, 3e-6]
+weight_decay = [1e-4, 1e-3]

@@ -7,6 +7,8 @@ import shutil
 import tomllib
 from datetime import datetime
 from pathlib import Path
+from itertools import product
+from copy import deepcopy
 
 import numpy as np
 import torch
@@ -73,3 +75,41 @@ def append_metrics_row(path: str | Path, row: dict) -> None:
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+        
+## Hyperparameter selection utilities ##
+
+def expand_configurations(hyper_cfg: dict) -> list[dict]:
+    """Given the hyper_cfg configuration dictionary this function 
+    extract the values dictionary in the form
+    {"param1": [values], "param2": [values], ...} and
+    return a list of dictionaries with all parameter combinations 
+    (cartesian product).
+    """
+    values = hyper_cfg.get("values", {})
+    if not values:
+        return []
+
+    keys = list(values.keys())
+    value_lists = [values[k] for k in keys]
+
+    return [
+        dict(zip(keys, combo))
+        for combo in product(*value_lists)
+    ]
+    
+def apply_hyperparameters_to_config(base_config: dict, comb: dict) -> dict:
+    config = deepcopy(base_config)
+
+    for name, value in comb.items():
+        if name == "lr":
+            config["train"]["lr"] = value
+        elif name == "batch_size":
+            config["train"]["batch_size"] = value
+        elif name == "weight_decay":
+            config["train"]["weight_decay"] = value
+        elif name == "head_warmup_epochs":
+            config["train"]["head_warmup_epochs"] = value
+        else:
+            raise ValueError(f"Unsupported hyperparameter: {name}")
+
+    return config
