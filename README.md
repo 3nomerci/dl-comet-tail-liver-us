@@ -1,28 +1,7 @@
 # LPAC_project
 
-LPAC_project is a config-driven PyTorch repository for binary medical image classification experiments.
-The current baseline is ResNet18.
-
-## Dataset Assumptions
-Data preparation is done offline. Training code consumes a packed dataset file, for example data/dataset.pt.
-
-Expected structure:
-
-```python
-{
-		"images": Tensor [N, 3, H, W],
-		"labels": Tensor [N],
-		"patients": Tensor [N],
-		"paths": list[str],
-		"image_size": int,
-}
-```
-
-Current packed baseline assumptions:
-- images are already standardized to 3 x H x W 
-- labels and patients are torch.long
-- patient IDs are integer-valued
-- offline dataset preparation already applied aspect-ratio resize, center padding, and min-max normalization
+LPAC_project is a config-driven PyTorch repository for binary medical image classification.
+Current baseline model: ResNet18.
 
 ## Setup
 
@@ -36,81 +15,137 @@ uv sync
 uv run pytest
 ```
 
-## Training
+## Dataset Format
+Training expects a packed dataset file (.pt) with this structure:
+
+```python
+{
+		"images": Tensor [N, 3, H, W],
+		"labels": Tensor [N],
+		"patients": Tensor [N],
+		"paths": list[str],
+		"image_size": int,
+}
+```
+
+Assumptions:
+- `images` are already prepared offline
+- `labels` and `patients` are `torch.long`
+- each patient has a consistent label across all its images
+
+## Run Training
+
+Standard run:
 
 ```bash
 uv run python -m lpac_project.train --config configs/resnet18_baseline.toml
 ```
 
-Smoke mode:
+Smoke run (fast sanity check):
 
 ```bash
-uv run python -m lpac_project.train --config configs/resnet18_baseline.toml --smoke
+uv run python -m lpac_project.train --config configs/resnet18_baseline.toml --smoke --device cuda
 ```
 
+In smoke mode, each split is capped to at most 100 samples and training epochs are forced to 1.
+
 ## Split Logic
-Splits are patient-level and deterministic under fixed seed.
 
-Implemented behavior:
-- patient-level non-leakage
-- optional label stratification (binary labels)
-- sample-aware assignment that tries to match train/val/test sample fractions
-
-Config keys in configs/resnet18_baseline.toml:
+Splits are patient-level (no patient leakage across train/val/test).
 
 ```toml
 [split]
-method = "heuristic_balanced" # or "naive"
-seed = 42
+method = "naive" # or "heuristic_balanced"
+seed = 53100
 train_fraction = 0.70
 val_fraction = 0.15
 test_fraction = 0.15
 stratify = true
 save_artifact = true
 ```
-method:
-- heuristic_balanced: try to balance sample level class stratification, patient fraction, sample fraction to match the specified fractions.
-- naive: give specified fractions of patients to each split
 
-Hint: running in smoke mode will generate the split report (if active), which can be inspected before training.
+Behavior by method:
+- `naive`: random patient split by fractions
+- `heuristic_balanced`: tries to balance sample fractions and label distribution across splits
 
-## Model Selection And Scheduler
-Best checkpoint selection is based on validation balanced accuracy. The best checkpoint is used to produce final test metrics.
+Note: `stratify` only affects the `heuristic_balanced` method.
 
-When model.pretrained is true, training runs a head-only warmup phase before full fine-tuning.
-Warmup can be controlled from the train section.
+## Training Logic
 
-Scheduler is configured from the train section:
+- criterion: cross-entropy (optionally class-weighted)
+- model selection metric: validation balanced accuracy
+- if `model.pretrained=true`, head warmup runs before full fine-tuning
+- scheduler is configured under `[train.scheduler]`
 
 ```toml
-[train]
-epochs = 5
-lr = 1e-5
-head_warmup_epochs = 1
-head_warmup_lr = 1e-5
-head_warmup_weight_decay = 1e-4
-
 [train.scheduler]
 name = "none" # supported: none, plateau, cosine
-mode = "max" # used by plateau, monitor is val balanced accuracy
+mode = "max"
 factor = 0.5
 patience = 2
 min_lr = 1e-7
-t_max = 5 # used by cosine
+t_max = 5
 eta_min = 1e-7
 ```
 
-## Run Artifacts
-Each training run creates an output folder under outputs/ with:
-- config.toml: copied run config
-- metrics.csv: epoch-level train/val metrics
-- last_model.pt: last checkpoint
-- best_model.pt: best checkpoint by validation balanced accuracy
-- test_metrics.json: final test metrics from best checkpoint
-- split.json: split indices and patient IDs per split
-- split_summary.json: split audit summary (counts, fractions, class counts, metadata)
+## Hyperparameter Selection
 
-## Repository Structure
+Hyperparameter selection is grid-based and config-driven.
+
+```toml
+[hyperparameters_selection]
+perform = true
+cross_validation = false # placeholder, not implemented yet
+k_folds = 3 # placeholder, used only when CV is implemented
+
+[hyperparameters_selection.values]
+lr = [5e-7, 1e-6, 3e-6]
+weight_decay = [1e-4, 1e-3]
+```
+
+Current implemented behavior:
+- generates all combinations from `[hyperparameters_selection.values]` via Cartesian product
+- runs one training trial per combination on the same train/val split
+- selects the best trial by validation balanced accuracy
+- evaluates test metrics once, using the best trial checkpoint
+
+Supported tunable keys (currently):
+- `lr`
+- `batch_size`
+- `weight_decay`
+- `head_warmup_epochs`
+
+Determinism note:
+- trial seed is reset from `split.seed` at each trial start for comparable randomness across trials
+
+## Output Artifacts
+
+Each run creates `outputs/<run_name>_<timestamp>/`.
+
+Always produced:
+- `config.toml` (copied input config)
+- `split.json`
+- `split_summary.json`
+
+Single-trial mode (`perform=false`):
+- `metrics.csv`
+- `best_model.pt`
+- `test_metrics.json`
+
+Hyperparameter-search mode (`perform=true`):
+- `hyperparameter_search_results.json`
+- `best_hyperparameters.json`
+- `best_model.pt` (copied from best trial)
+- `test_metrics.json` (computed once from best trial model)
+- `trial_XXX/` subfolders, each containing:
+	- `hyperparameters.json`
+	- `resolved_config.json`
+	- `metrics.csv`
+	- `best_model.pt`
+
+Note: `last_model.pt` is currently not saved by default.
+
+## Repository Layout
 
 ```text
 configs/
