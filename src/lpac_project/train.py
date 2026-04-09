@@ -220,6 +220,7 @@ def run_training_trial(
     total_epochs = head_warmup_epochs + epochs
     global_epoch = 0
 
+    print(f"\nBuilding model '{model_cfg['name']}' with pretrained={pretrained} and dropout={model_cfg.get('dropout', 0.0)}")
     model = build_model(model_cfg).to(device)
 
     if head_warmup_epochs > 0:
