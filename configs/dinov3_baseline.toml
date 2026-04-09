@@ -3,15 +3,15 @@ name = "resnet18_baseline"
 output_root = "outputs"
 
 [data]
-dataset_path = "data/imgNum_770_imgSize_448_04-07_MC.pt"
+dataset_path = "data/imgNum_770_imgSize_768_04-07_MC.pt"
 num_workers = 0
 pin_memory = true
 
 [data.transform]
-random_horizontal_flip_p = 0.0
+random_horizontal_flip_p = 0.5
 
 [split]
-method = "naive"
+method = "heuristic_balanced"
 seed = 53100
 train_fraction = 0.70
 val_fraction = 0.15

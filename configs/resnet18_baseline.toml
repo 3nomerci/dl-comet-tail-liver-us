@@ -12,7 +12,7 @@ random_horizontal_flip_p = 0.0
 
 [split]
 method = "heuristic_balanced" # supported: naive, heuristic_balanced
-seed = 42
+seed = 53100
 train_fraction = 0.70
 val_fraction = 0.15
 test_fraction = 0.15
