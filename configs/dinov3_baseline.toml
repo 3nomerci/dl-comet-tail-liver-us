@@ -11,8 +11,8 @@ pin_memory = true
 random_horizontal_flip_p = 0.0
 
 [split]
-method = "heuristic_balanced" # supported: naive, heuristic_balanced
-seed = 42
+method = "naive"
+seed = 53100
 train_fraction = 0.70
 val_fraction = 0.15
 test_fraction = 0.15
@@ -20,7 +20,7 @@ stratify = true  # Note: does not work if method is naive
 save_artifact = true
 
 [model]
-name = "resnet18" # supported: resnet18, dinov3_vitb16_distilled
+name = "dinov3_vitb16_distilled" # supported: resnet18, dinov3_vitb16_distilled
 num_classes = 2
 pretrained = true
 dropout = 0.2
@@ -51,5 +51,5 @@ cross_validation = false # not yet implemented
 k_folds = 3 # onlys used if cross_validation is true
 
 [hyperparameters_selection.values] # expanded using cartesian_product
-lr = [5e-7, 1e-6, 5e-6]
+lr = [5e-7, 1e-6, 3e-6]
 weight_decay = [1e-4, 1e-3]
